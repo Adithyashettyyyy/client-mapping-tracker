@@ -146,6 +146,3 @@ render.yaml             Render deployment settings
 .env.example            Template for local settings (copy to .env)
 ```
 
-## Security note
-
-The app has **no login yet**. Anyone with the link can view, edit, and delete clients. Share the link only with the team.
