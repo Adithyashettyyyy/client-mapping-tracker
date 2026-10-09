@@ -1,0 +1,175 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>Mapping Desk</title>
+  <meta name="description" content="Client mapping progress and review tracker.">
+  <meta name="theme-color" content="#18181B">
+  <link rel="icon" type="image/svg+xml" href="favicon.svg">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400..700&display=swap">
+  <script>
+    // Apply the saved theme before first paint to avoid a flash.
+    try { document.documentElement.className = localStorage.getItem("mapping-desk:theme") === "light" ? "light" : "dark"; } catch {}
+  </script>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <div class="app-shell">
+    <div class="mapping-desk">
+      <aside class="md-sidebar">
+        <a class="md-brand" href="#" data-action="nav" data-view="overview">
+          <span class="md-brand-mark"><span data-icon="check" data-size="18" data-stroke="2.5"></span></span>
+          <span>Mapping<span>Desk</span></span>
+        </a>
+        <nav class="md-nav" id="md-nav" aria-label="Main navigation"></nav>
+        <div class="md-sidebar-spacer"></div>
+        <section class="md-team" id="md-team" aria-label="Client owners"></section>
+        <div class="md-sidebar-foot" id="md-sidebar-foot"></div>
+      </aside>
+
+      <main class="md-main">
+        <header class="md-topbar">
+          <div class="md-mobile-brand"><span class="md-brand-mark"><span data-icon="check" data-size="16" data-stroke="2.5"></span></span>Mapping Desk</div>
+          <label class="md-search">
+            <span data-icon="search" data-size="16" data-stroke="1.8"></span>
+            <input id="md-search" type="text" placeholder="Search clients, IDs, notes…" aria-label="Search clients" autocomplete="off">
+            <kbd>/</kbd>
+          </label>
+          <div class="md-top-actions">
+            <span class="md-save-state"><i></i>Live data</span>
+            <button type="button" class="btn btn--outline btn--sm md-export" data-action="export"><span data-icon="download" data-size="15"></span>Export CSV</button>
+            <button type="button" class="btn btn--sm md-add" data-action="new"><span data-icon="plus" data-size="16"></span>New client <kbd>C</kbd></button>
+            <button type="button" class="btn btn--ghost btn--icon md-theme-btn" id="md-theme-btn" data-action="theme"></button>
+            <button type="button" class="btn btn--ghost btn--icon md-theme-btn md-agent-btn" id="md-agent-btn" data-action="agent" aria-label="Toggle agent panel" aria-controls="agent-rail" aria-expanded="false"><span data-icon="sparkles" data-size="16"></span></button>
+          </div>
+        </header>
+
+        <nav class="md-mobile-nav" id="md-mobile-nav" aria-label="Mobile navigation"></nav>
+
+        <section class="md-content" id="md-content"></section>
+      </main>
+    </div>
+
+    <aside class="agent-rail" id="agent-rail" aria-label="Agent" hidden>
+      <header class="agent-rail-head">
+        <span class="agent-rail-title"><span data-icon="sparkles" data-size="17"></span>Agent</span>
+        <button type="button" class="btn btn--ghost btn--icon" data-action="agent" aria-label="Close agent panel"><span data-icon="x" data-size="16"></span></button>
+      </header>
+      <div class="agent-rail-body">
+        <div class="agent-soon">
+          <span class="md-empty-icon"><span data-icon="sparkles" data-size="20"></span></span>
+          <b>Coming soon</b>
+          <p>The Mapping Desk agent is on its way. You'll be able to ask about clients and update records from here.</p>
+          <span class="agent-soon-badge">Coming soon</span>
+        </div>
+      </div>
+      <footer class="agent-rail-composer">
+        <label class="sr-only" for="agent-composer">Message the agent</label>
+        <textarea id="agent-composer" rows="1" placeholder="Agent chat is coming soon…" disabled></textarea>
+        <button type="button" class="btn btn--primary btn--icon" aria-label="Send" disabled><span data-icon="arrow-up" data-size="16"></span></button>
+      </footer>
+    </aside>
+  </div>
+
+  <!-- Client sheet -->
+  <div class="md-overlay" id="md-sheet-overlay" data-action="close-sheet" hidden></div>
+  <aside class="md-sheet" id="md-sheet" role="dialog" aria-modal="true" aria-labelledby="md-sheet-title" aria-describedby="md-sheet-description" hidden>
+    <header class="md-sheet-head">
+      <div class="md-sheet-kicker-row"><span class="md-sheet-kicker" id="md-sheet-kicker">New record</span><span id="md-sheet-status"></span></div>
+      <h2 id="md-sheet-title">Add client</h2>
+      <p id="md-sheet-description">Create a client record in the mapping tracker.</p>
+      <button type="button" class="btn btn--ghost btn--icon md-sheet-close" data-action="close-sheet" aria-label="Close"><span data-icon="x" data-size="16"></span></button>
+    </header>
+    <form class="md-form" id="md-form" novalidate>
+      <div class="md-form-body">
+        <section class="md-form-section">
+          <div class="md-form-section-head"><h3>Client details</h3><span>Required fields marked *</span></div>
+          <div class="md-form-grid">
+            <div class="md-field"><label for="md-customer-id">Customer ID <em>*</em></label><input class="input" id="md-customer-id" name="customerId" type="number" min="1" step="1" required placeholder="e.g. 1090"></div>
+            <div class="md-field"><label for="md-client-name">Client name <em>*</em></label><input class="input" id="md-client-name" name="name" required maxlength="200" placeholder="Client or brand name"></div>
+            <div class="md-field"><label for="md-sites">Number of sites</label><input class="input" id="md-sites" name="siteCount" type="number" min="0" step="1" placeholder="—"></div>
+            <div class="md-field"><label for="md-na-count">Sites with N/A pricing</label><input class="input" id="md-na-count" name="naCount" type="number" min="0" step="1" placeholder="—"></div>
+            <div class="md-field"><label for="md-country">Country</label><input class="input" id="md-country" name="country" maxlength="80" placeholder="USA" list="md-country-list" autocomplete="off"><datalist id="md-country-list"></datalist></div>
+            <div class="md-field"><div class="md-field-head"><label for="md-poc">Owner / POC</label><button type="button" class="md-link-btn" data-action="owners-open">Manage owners</button></div><select id="md-poc" name="poc" class="md-native-select"></select></div>
+            <div class="md-field"><label for="md-lead-one">Lead 1</label><input class="input" id="md-lead-one" name="lead1" maxlength="120" placeholder="Mapping lead"></div>
+            <div class="md-field"><label for="md-lead-two">Lead 2</label><input class="input" id="md-lead-two" name="lead2" maxlength="120" placeholder="Second lead"></div>
+            <div class="md-field md-field--full"><label for="md-tracking">Tracking state</label><select id="md-tracking" name="trackingGroup" class="md-native-select"><option value="cycle">In mapping cycle</option><option value="await">Awaiting mapping request</option><option value="nomap">No mapping needed</option></select></div>
+          </div>
+        </section>
+
+        <section class="md-form-section">
+          <div class="md-form-section-head"><h3>Cycle steps</h3><span>Status is set by the Final QC date</span></div>
+          <div class="md-step-list" id="md-step-list"></div>
+        </section>
+
+        <section class="md-form-section md-comments-section">
+          <div class="md-form-section-head"><h3>Mapping notes</h3></div>
+          <label class="sr-only" for="md-comments">Comments</label>
+          <textarea id="md-comments" name="comments" maxlength="4000" placeholder="Station IDs, data issues, product mapping notes…"></textarea>
+        </section>
+        <section class="md-form-section" id="md-history-section" hidden>
+          <div class="md-form-section-head"><h3>History</h3></div>
+          <div class="md-history" id="md-history"></div>
+        </section>
+        <p class="md-last-updated" id="md-last-updated" hidden></p>
+      </div>
+      <footer class="md-sheet-footer">
+        <button type="button" class="btn btn--outline-destructive btn--sm md-delete-trigger" id="md-delete-trigger" data-action="delete-open" hidden>Remove</button>
+        <button type="button" class="btn btn--outline btn--sm" id="md-mark-all" data-action="mark-all-today" hidden><span data-icon="check" data-size="14"></span>Mark cycle done today</button>
+        <span class="md-footer-spacer"></span>
+        <button type="button" class="btn btn--ghost btn--sm" data-action="close-sheet">Cancel</button>
+        <button type="submit" class="btn btn--sm" id="md-submit"></button>
+      </footer>
+    </form>
+  </aside>
+
+  <!-- Remove confirmation -->
+  <div class="md-overlay md-dialog-overlay" id="md-dialog-overlay" hidden></div>
+  <div class="md-dialog" id="md-dialog" role="alertdialog" aria-modal="true" aria-labelledby="md-dialog-title" aria-describedby="md-dialog-description" hidden>
+    <h2 id="md-dialog-title">Remove this client?</h2>
+    <p id="md-dialog-description">This client will be removed from the tracker.</p>
+    <div class="md-dialog-footer">
+      <button type="button" class="btn btn--outline btn--sm" data-action="delete-cancel">Keep client</button>
+      <button type="button" class="btn btn--destructive btn--sm" data-action="delete-confirm">Remove client</button>
+    </div>
+  </div>
+
+  <!-- Manage owners -->
+  <div class="md-overlay md-dialog-overlay" id="md-owners-overlay" data-action="owners-close" hidden></div>
+  <div class="md-dialog md-owners" id="md-owners" role="dialog" aria-modal="true" aria-labelledby="md-owners-title" aria-describedby="md-owners-description" hidden>
+    <div class="md-owners-head">
+      <h2 id="md-owners-title">Owners</h2>
+      <button type="button" class="btn btn--ghost btn--icon md-sheet-close" data-action="owners-close" aria-label="Close"><span data-icon="x" data-size="16"></span></button>
+    </div>
+    <p id="md-owners-description">People who can be assigned as a client's owner / POC.</p>
+    <form class="md-owner-add" id="md-owner-form" novalidate>
+      <label class="sr-only" for="md-owner-name">New owner name</label>
+      <input class="input" id="md-owner-name" maxlength="120" placeholder="New owner name" autocomplete="off">
+      <button type="submit" class="btn btn--primary btn--sm" id="md-owner-submit"><span data-icon="plus" data-size="15"></span>Add owner</button>
+    </form>
+    <div class="md-owner-list" id="md-owner-list"></div>
+  </div>
+
+  <!-- Overdue window setting -->
+  <div class="md-overlay md-dialog-overlay" id="md-settings-overlay" data-action="settings-close" hidden></div>
+  <form class="md-dialog" id="md-settings" role="dialog" aria-modal="true" aria-labelledby="md-settings-title" hidden novalidate>
+    <h2 id="md-settings-title">Overdue window</h2>
+    <p>A client turns <b>overdue</b> this many days after its Final QC date, and <b>due soon</b> in the 7 days before that.</p>
+    <div class="md-settings-field">
+      <label for="md-sla-input">Days after Final QC</label>
+      <input class="input" id="md-sla-input" type="number" min="1" max="365" step="1" required>
+    </div>
+    <div class="md-dialog-footer">
+      <button type="button" class="btn btn--outline btn--sm" data-action="settings-close">Cancel</button>
+      <button type="submit" class="btn btn--primary btn--sm" id="md-settings-submit">Save</button>
+    </div>
+  </form>
+
+  <div class="md-toasts" id="md-toasts" aria-live="polite"></div>
+
+  <script src="app.js"></script>
+</body>
+</html>

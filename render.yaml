@@ -1,0 +1,20 @@
+# Render Blueprint: Render → New → Blueprint → pick this repo.
+# MONGODB_URI is a secret, so it is NOT stored here; Render asks for it when
+# the Blueprint is created (sync: false). Paste your Atlas connection string there.
+services:
+  - type: web
+    name: mapping-desk
+    runtime: node
+    plan: free
+    branch: main
+    buildCommand: npm ci
+    startCommand: npm start
+    healthCheckPath: /api/health
+    autoDeploy: true
+    envVars:
+      - key: NODE_VERSION
+        value: "24"
+      - key: MONGODB_URI
+        sync: false
+      - key: MONGODB_DB
+        value: mapping_desk

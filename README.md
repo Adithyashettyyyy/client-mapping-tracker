@@ -1,53 +1,69 @@
 # Mapping Desk
 
-Mapping Desk is a client-mapping tracker for coordinators. It tracks client details, owners, mapping leads, notes, and four review dates, with an overview of cycle status, client distribution by country, at-risk clients, and recent activity.
+A client-mapping tracker for coordinators. It tracks client details, owners, mapping leads, notes, and four review dates (Flag 10 review → Price N/A review → Comp review → Final QC), with an overview of cycle status, clients by country, at-risk clients, and recent activity.
 
-## Features
+Data is stored in **MongoDB Atlas**. A small Node.js + Express server serves the website and the API.
 
-- Dashboard counts and charts are derived from saved client records.
-- Search and filter by status, owner, and country.
-- Create, edit, and remove client records; changes are recorded in the activity history.
-- Export the client register as CSV.
-- UI and Agent-Native agent share the same database-backed actions.
+## Setup
 
-## Data and database
-
-Structured app data is stored in PostgreSQL through Drizzle ORM. The schema is in `drizzle/schema.ts`; migrations are in `drizzle/migrations/`. The `mapping_clients` table stores tracker records, and `mapping_activities` stores the change history. The overview charts are derived from records returned by the `list-clients` action; they do not use hard-coded sample data.
-
-For local development, the Agent-Native starter provides its local database setup. For deployments where data must survive restarts, configure `DATABASE_URL` with a persistent PostgreSQL connection. If your database provider supplies a separate unpooled connection string for migrations, configure `DATABASE_URL_UNPOOLED` as well. Keep database credentials in Builder's environment/secret settings; do not commit them.
-
-This app does not require login, so tracker records use a shared `public` scope. Anyone with access to the app can view and edit those records. PostgreSQL/Drizzle is the primary data store; MongoDB is not connected.
-
-## Develop locally
+1. Install [Node.js](https://nodejs.org/) 22.9 or newer.
+2. In MongoDB Atlas: create a cluster, add a database user, and allow your IP under **Network Access**.
+3. Copy `.env.example` to `.env` and paste your connection string into `MONGODB_URI` (Atlas → Connect → Drivers).
+4. Install and start:
 
 ```bash
-corepack enable
-pnpm install
-pnpm dev
+npm install
+npm start
 ```
 
-Generate and apply schema changes with:
+Open http://localhost:3000/. Use `npm run dev` to restart automatically when `server.js` changes.
+
+## Deploy on Render
+
+The repo includes a Render Blueprint (`render.yaml`). The connection string is **not** in the code. You add it in Render as an environment variable.
+
+1. In MongoDB Atlas → **Network Access**, add `0.0.0.0/0` (Render's free plan has no fixed IP).
+2. In Render: **New → Blueprint**, connect this GitHub repo, and pick the `main` branch.
+3. When Render asks for `MONGODB_URI`, paste your Atlas connection string (write any `@` in the password as `%40`). `MONGODB_DB` and `NODE_VERSION` are filled in automatically.
+4. Click **Apply**. Render runs `npm ci`, then `npm start`, and checks `/api/health`. Your app URL is shown at the top of the service page.
+
+To change the connection string later, open the service → **Environment** → edit `MONGODB_URI` → **Save, rebuild, and deploy**. Every push to `main` redeploys automatically. Data lives in Atlas, so deploys never touch it.
+
+## Import from Excel
 
 ```bash
-pnpm db:generate
-pnpm db:migrate
+npm run import -- "C:\path\to\file.xlsx"           # preview: shows what would be imported
+npm run import -- "C:\path\to\file.xlsx" --write   # save to MongoDB
 ```
 
-## Checks
+The first sheet must have the tracker headers (Customer ID, Client Name, Number of Sites, Country, No. of NA's, Flag 10 Review via Report, Site with Price N/a, Comp Sites Mapping Review, Dashboard Final Qc, Comments If any, POC, Lead 1, Lead 2). Rows are matched by Customer ID, so re-importing updates existing clients instead of duplicating them. Comments containing "No mapping Needed" or "Yet to receive Mapping request" set the tracking state. The "Mapping Status" column is ignored because the app calculates status from the Final QC date.
 
-```bash
-pnpm typecheck
-pnpm agent-native:doctor
-```
+## Data
 
-## Project layout
+Database `mapping_desk` (change with `MONGODB_DB`) has four collections:
 
-- `app/`: React routes, components, and styles
-- `actions/`: database operations shared by the UI and agent
-- `server/`: database client and server plugins
-- `drizzle/schema.ts`: PostgreSQL table definitions
-- `drizzle/migrations/`: generated migrations
+- `clients`: one document per client. `_id` is a UUID string and `customerId` is unique.
+- `activity`: a log entry for every add, update, and removal.
+- `owners`: people who can be a client's POC. A client's POC must be an existing owner or empty (Unassigned). On first start the list is built from existing POC names, and the Excel import adds any new POC names.
+- `settings`: one document holding the overdue window (`slaDays`, default 15).
 
-Client records are listed by `list-clients`; create, edit, and delete operations use `create-client`, `update-client`, and `delete-client`. Recent history is available through `list-activity`.
+## API
 
-Framework documentation: [Agent-Native](https://agent-native.com/docs).
+| Method | Path | Purpose |
+| --- | --- | --- |
+| GET | `/api/clients` | Up to 500 clients, most recently updated first |
+| GET | `/api/activity` | Latest changes (`?limit=` up to 200, `?clientId=` for one client's history) plus `total` and `cyclesClosedThisWeek` |
+| POST | `/api/clients/bulk` | `{ ids, action }` with action `cycle-done` or `final-qc` (plus `date`) or `assign` (plus `poc`) |
+| GET / PUT | `/api/settings` | The overdue window: `{ "slaDays": 15 }` (1–365) |
+| POST | `/api/clients` | Create a client |
+| PATCH | `/api/clients/:id` | Update fields on a client |
+| DELETE | `/api/clients/:id` | Remove a client (activity is kept) |
+| GET | `/api/owners` | All owners, A–Z |
+| POST | `/api/owners` | Add an owner (`{ "name": "..." }`, unique ignoring case) |
+| DELETE | `/api/owners/:id` | Remove an owner; their clients become Unassigned |
+
+## Files
+
+- `server.js`: Express server, validation, MongoDB access
+- `public/index.html`, `public/styles.css`, `public/app.js`: the website
+- `.env`: your secrets (never committed)
