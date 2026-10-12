@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { randomUUID, timingSafeEqual } from "node:crypto";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -6,6 +6,7 @@ import express from "express";
 import { MongoClient } from "mongodb";
 
 import { CLIENT_DEFAULTS, CLIENT_FIELDS, STEP_FIELDS, TRIMMED_FIELDS, validateClient } from "./lib/clients.js";
+import { OWNERS_TAB, SHEET_FIELDS, SheetLink, newClientFromSheet, sheetConfigFromEnv } from "./lib/sheets.js";
 
 // ---------------------------------------------------------------------------
 // Config
@@ -19,6 +20,18 @@ if (!MONGODB_URI || MONGODB_URI.includes("<")) {
   console.error("Missing MONGODB_URI. Locally: copy .env.example to .env and paste your MongoDB Atlas connection string. On Render: add MONGODB_URI under the service's Environment settings.");
   process.exit(1);
 }
+
+let sheet = null;
+try {
+  const config = sheetConfigFromEnv(process.env);
+  if (config) sheet = new SheetLink(config);
+} catch (error) {
+  console.error(`Google Sheet link isn't set up correctly: ${error.message}`);
+  process.exit(1);
+}
+const SHEET_SYNC_MS = 30_000;
+// A sync never removes more clients than this at once, in case rows were deleted by mistake.
+const MAX_SHEET_REMOVALS = 5;
 
 // ---------------------------------------------------------------------------
 // Request helpers
@@ -136,6 +149,171 @@ function rethrowDuplicate(error) {
 }
 
 // ---------------------------------------------------------------------------
+// Google Sheet link (only when GOOGLE_SHEET_ID is set)
+// ---------------------------------------------------------------------------
+
+// Edits and sheet syncs run one at a time, so a sync never reads the sheet halfway through an edit.
+let writeQueue = Promise.resolve();
+function exclusive(task) {
+  const run = writeQueue.then(task);
+  writeQueue = run.catch(() => {});
+  return run;
+}
+
+let sheetStatus = { lastSyncAt: null, error: null, problems: [] };
+let lastSyncStarted = 0;
+let pendingSync = null;
+
+/** The sheet is the main copy, so dashboard edits go to it first. If that fails, nothing is saved. */
+async function pushToSheet(changes) {
+  if (!sheet) return;
+  try {
+    await sheet.write(changes);
+  } catch (error) {
+    throw new HttpError(502, `Not saved: couldn't update the Google Sheet. ${error.message}`);
+  }
+}
+
+const sameValue = (a, b) => (typeof a === "string" && typeof b === "string" ? a.trim() === b.trim() : (a ?? null) === (b ?? null));
+
+/**
+ * Makes MongoDB match the sheet: owners from the Owners tab, then clients from
+ * the clients tab. Any sheet fixes this implies (new names in the Owners tab,
+ * POCs cleared for removed owners) are written to the sheet first.
+ * Returns how many records changed.
+ */
+async function syncFromSheet() {
+  const parsed = await sheet.read();
+  const now = new Date().toISOString();
+  const problems = [...parsed.problems, ...(parsed.owners?.problems ?? [])];
+  const sheetEdits = { updates: [], ownerAdds: [] };
+
+  // --- Plan owners -----------------------------------------------------------
+  const owners = await ownersCol.find().toArray();
+  const known = new Map(owners.map((owner) => [owner.name.toLowerCase(), owner.name])); // owners after this sync
+  let removedOwners = [];
+  if (parsed.owners) {
+    const gone = owners.filter((owner) => !parsed.owners.names.has(owner.name.toLowerCase()));
+    if (gone.length > MAX_SHEET_REMOVALS) {
+      problems.push({ tab: OWNERS_TAB, row: null, message: `${gone.length} owners are on the dashboard but not in the Owners tab. They weren't removed, because that's more than ${MAX_SHEET_REMOVALS} at once. Put the names back, or remove the owners on the dashboard.` });
+    } else {
+      removedOwners = gone;
+      for (const owner of gone) known.delete(owner.name.toLowerCase());
+    }
+    for (const { name } of parsed.owners.names.values()) if (!known.has(name.toLowerCase())) known.set(name.toLowerCase(), name);
+  } else {
+    sheetEdits.ownerAdds.push(...known.values()); // first sync: create the Owners tab from the current owners
+  }
+  const removedKeys = new Set(removedOwners.map((owner) => owner.name.toLowerCase()));
+
+  // --- Plan the overdue window (the number in the Mapping Status formula) ----
+  // If any formula differs from the current window, someone edited it: adopt that number and make every formula match.
+  const settings = await getSettings();
+  let newSlaDays = null;
+  const differing = parsed.statusFormulas.filter((cell) => cell.days !== settings.slaDays);
+  if (differing.length) {
+    const counts = new Map();
+    for (const cell of differing) counts.set(cell.days, (counts.get(cell.days) ?? 0) + 1);
+    const [days] = [...counts].sort((a, b) => b[1] - a[1])[0];
+    if (days >= 1 && days <= 365) {
+      newSlaDays = days;
+      sheetEdits.slaDays = days;
+    } else {
+      problems.push({ row: differing[0].row, message: `The Mapping Status formula uses ${days} days; the overdue window must be 1 to 365 days.` });
+    }
+  }
+
+  // --- Plan clients ----------------------------------------------------------
+  const fromSheet = new Map();
+  for (const [customerId, { client }] of parsed.rows) {
+    let poc = client.poc;
+    if (poc && removedKeys.has(poc.toLowerCase())) {
+      poc = ""; // owner removed from the Owners tab: unassign, in the sheet too
+      sheetEdits.updates.push({ customerId, client: { ...client, poc } });
+    } else if (poc && !known.has(poc.toLowerCase())) {
+      known.set(poc.toLowerCase(), poc); // new name typed as a POC: becomes an owner
+      sheetEdits.ownerAdds.push(poc);
+    }
+    fromSheet.set(customerId, { ...client, poc: poc ? known.get(poc.toLowerCase()) : "" });
+  }
+
+  if (sheetEdits.updates.length || sheetEdits.ownerAdds.length || newSlaDays) await sheet.write(sheetEdits, parsed);
+
+  // --- Apply to MongoDB ------------------------------------------------------
+  let changed = 0;
+  if (newSlaDays) {
+    await settingsCol.updateOne({ _id: "app" }, { $set: { slaDays: newSlaDays } }, { upsert: true });
+    await logActivity(null, `Overdue window changed from ${settings.slaDays} to ${newSlaDays} days (from Google Sheet)`, null, now, "settings");
+    changed += 1;
+  }
+  for (const owner of removedOwners) {
+    await ownersCol.deleteOne({ _id: owner._id });
+    await logActivity(null, `Owner ${owner.name} removed (from Google Sheet)`, null, now, "owner");
+    changed += 1;
+  }
+  const existingOwners = new Set(owners.map((owner) => owner.name.toLowerCase()));
+  for (const name of known.values()) {
+    if (existingOwners.has(name.toLowerCase())) continue;
+    await ownersCol.updateOne({ name }, { $setOnInsert: { _id: randomUUID(), name, createdAt: now } }, { upsert: true, collation: CASE_INSENSITIVE });
+    await logActivity(null, `Owner ${name} added (from Google Sheet)`, null, now, "owner");
+    changed += 1;
+  }
+
+  const existing = new Map((await clientsCol.find().toArray()).map((client) => [client.customerId, client]));
+  for (const [customerId, client] of fromSheet) {
+    const before = existing.get(customerId);
+    if (!before) {
+      const doc = { _id: randomUUID(), ...newClientFromSheet(client), createdAt: now, updatedAt: now };
+      await clientsCol.insertOne(doc);
+      await logActivity(doc, "Added from Google Sheet", doc._id, now, doc.finalQcAt ? "final-qc" : "edit");
+      changed += 1;
+      continue;
+    }
+    const changes = {};
+    for (const field of SHEET_FIELDS) if (!sameValue(client[field], before[field])) changes[field] = client[field];
+    if (!Object.keys(changes).length) continue;
+    await clientsCol.updateOne({ _id: before._id }, { $set: { ...changes, updatedAt: now } });
+    const kind = changes.finalQcAt ? "final-qc" : "edit";
+    await logActivity({ ...before, ...changes }, `From Google Sheet: ${describeChanges(before, changes)}`, before._id, now, kind);
+    changed += 1;
+  }
+
+  const missing = [...existing.values()].filter((client) => !parsed.rows.has(client.customerId) && !parsed.problemIds.has(client.customerId));
+  if (missing.length > MAX_SHEET_REMOVALS) {
+    problems.push({
+      row: null,
+      message: `${missing.length} clients are on the dashboard but not in the sheet. They weren't removed, because that's more than ${MAX_SHEET_REMOVALS} at once. Put the rows back, or remove the clients on the dashboard.`,
+    });
+  } else {
+    for (const client of missing) {
+      await clientsCol.deleteOne({ _id: client._id });
+      await logActivity(client, `Removed CL-${client.customerId} ${client.name} (deleted from Google Sheet)`, null, now);
+      changed += 1;
+    }
+  }
+
+  sheetStatus = { lastSyncAt: now, error: null, problems };
+  return changed;
+}
+
+/** Runs a sync unless one is already queued; failures are kept in sheetStatus, not thrown. */
+function runSheetSync() {
+  pendingSync ??= exclusive(async () => {
+    lastSyncStarted = Date.now();
+    try {
+      const changed = await syncFromSheet();
+      if (changed) console.log(`Google Sheet sync: ${changed} record(s) updated from the sheet.`);
+    } catch (error) {
+      sheetStatus = { ...sheetStatus, error: error.message };
+      console.error(`Google Sheet sync failed: ${error.message}`);
+    }
+  }).finally(() => {
+    pendingSync = null;
+  });
+  return pendingSync;
+}
+
+// ---------------------------------------------------------------------------
 // HTTP
 // ---------------------------------------------------------------------------
 
@@ -150,6 +328,7 @@ app.get("/api/health", async (_req, res) => {
 });
 
 app.get("/api/clients", async (_req, res) => {
+  if (sheet && Date.now() - lastSyncStarted > 10_000) await runSheetSync();
   const docs = await clientsCol.find().sort({ updatedAt: -1 }).limit(500).toArray();
   res.json({ clients: docs.map(toApi) });
 });
@@ -167,23 +346,38 @@ app.get("/api/activity", async (req, res) => {
   res.json({ activities: docs.map(toApi), total, cyclesClosedThisWeek });
 });
 
+app.get("/api/sheet", (_req, res) => {
+  if (!sheet) return res.json({ enabled: false });
+  res.json({ enabled: true, url: sheet.url, ...sheetStatus });
+});
+
+// Called by the Apps Script when someone edits the sheet, so the change shows without waiting for the next check.
+app.post("/api/sheet/sync", (req, res) => {
+  const given = Buffer.from(typeof req.body?.secret === "string" ? req.body.secret : "");
+  const expected = Buffer.from(sheet?.secret ?? "");
+  if (!sheet || given.length !== expected.length || !timingSafeEqual(given, expected)) throw new HttpError(403, "Not allowed.");
+  runSheetSync();
+  res.status(202).json({ ok: true });
+});
+
 app.get("/api/settings", async (_req, res) => {
   res.json({ settings: await getSettings() });
 });
 
-app.put("/api/settings", async (req, res) => {
+app.put("/api/settings", (req, res) => exclusive(async () => {
   const slaDays = req.body?.slaDays;
   if (!Number.isInteger(slaDays) || slaDays < 1 || slaDays > 365) throw new HttpError(400, "Overdue window must be a whole number of days from 1 to 365.");
   const before = await getSettings();
   if (before.slaDays !== slaDays) {
+    await pushToSheet({ slaDays });
     await settingsCol.updateOne({ _id: "app" }, { $set: { slaDays } }, { upsert: true });
     await logActivity(null, `Overdue window changed from ${before.slaDays} to ${slaDays} days`, null, new Date().toISOString(), "settings");
   }
   res.json({ settings: await getSettings() });
-});
+}));
 
 // Apply one action to many clients: mark the full cycle done, set Final QC, or reassign the owner.
-app.post("/api/clients/bulk", async (req, res) => {
+app.post("/api/clients/bulk", (req, res) => exclusive(async () => {
   const { ids, action, date, poc } = req.body ?? {};
   if (!Array.isArray(ids) || !ids.length || ids.length > 500 || !ids.every((id) => typeof id === "string")) {
     throw new HttpError(400, "Select between 1 and 500 clients.");
@@ -213,26 +407,29 @@ app.post("/api/clients/bulk", async (req, res) => {
   }
 
   const targets = await clientsCol.find({ _id: { $in: ids } }).toArray();
+  await pushToSheet({ updates: targets.map((client) => ({ customerId: client.customerId, client: { ...client, ...set } })) });
   const now = new Date().toISOString();
   await clientsCol.updateMany({ _id: { $in: targets.map((client) => client._id) } }, { $set: { ...set, updatedAt: now } });
   for (const client of targets) await logActivity(client, message, client._id, now, kind);
   res.json({ updated: targets.length });
-});
+}));
 
-app.post("/api/clients", async (req, res) => {
+app.post("/api/clients", (req, res) => exclusive(async () => {
   const client = { ...CLIENT_DEFAULTS, ...pickClientFields(req.body) };
   const error = validateClient(client);
   if (error) throw new HttpError(400, error);
   client.poc = await resolveOwner(client.poc);
+  if (await clientsCol.findOne({ customerId: client.customerId })) rethrowDuplicate({ code: 11000 });
+  await pushToSheet({ appends: [client] });
 
   const now = new Date().toISOString();
   const doc = { _id: randomUUID(), ...client, createdAt: now, updatedAt: now };
   await clientsCol.insertOne(doc).catch(rethrowDuplicate);
   await logActivity(doc, "Added to tracker", doc._id, now, doc.finalQcAt ? "final-qc" : "edit");
   res.status(201).json({ client: toApi(doc) });
-});
+}));
 
-app.patch("/api/clients/:id", async (req, res) => {
+app.patch("/api/clients/:id", (req, res) => exclusive(async () => {
   const existing = await clientsCol.findOne({ _id: req.params.id });
   if (!existing) throw new HttpError(404, "Client not found in this tracker.");
 
@@ -240,6 +437,10 @@ app.patch("/api/clients/:id", async (req, res) => {
   const error = validateClient({ ...existing, ...changes });
   if (error) throw new HttpError(400, error);
   if ("poc" in changes && changes.poc !== existing.poc) changes.poc = await resolveOwner(changes.poc);
+  if ("customerId" in changes && changes.customerId !== existing.customerId && (await clientsCol.findOne({ customerId: changes.customerId }))) {
+    rethrowDuplicate({ code: 11000 });
+  }
+  await pushToSheet({ updates: [{ customerId: existing.customerId, client: { ...existing, ...changes } }] });
 
   const now = new Date().toISOString();
   const updated = await clientsCol
@@ -250,23 +451,28 @@ app.patch("/api/clients/:id", async (req, res) => {
   const kind = changes.finalQcAt && changes.finalQcAt !== existing.finalQcAt ? "final-qc" : "edit";
   if (summary) await logActivity(updated, summary, updated._id, now, kind);
   res.json({ client: toApi(updated) });
-});
+}));
 
-app.delete("/api/clients/:id", async (req, res) => {
+app.delete("/api/clients/:id", (req, res) => exclusive(async () => {
+  const existing = await clientsCol.findOne({ _id: req.params.id });
+  if (!existing) throw new HttpError(404, "Client not found in this tracker.");
+  await pushToSheet({ removes: [existing.customerId] });
   const deleted = await clientsCol.findOneAndDelete({ _id: req.params.id });
   if (!deleted) throw new HttpError(404, "Client not found in this tracker.");
   await logActivity(deleted, `Removed CL-${deleted.customerId} ${deleted.name}`, null, new Date().toISOString());
   res.json({ id: req.params.id, deleted: true });
-});
+}));
 
 app.get("/api/owners", async (_req, res) => {
   const docs = await ownersCol.find().sort({ name: 1 }).collation(CASE_INSENSITIVE).toArray();
   res.json({ owners: docs.map(toApi) });
 });
 
-app.post("/api/owners", async (req, res) => {
+app.post("/api/owners", (req, res) => exclusive(async () => {
   const name = typeof req.body?.name === "string" ? req.body.name.trim().replace(/\s+/g, " ") : "";
   if (!name || name.length > 120) throw new HttpError(400, "Owner name is required (up to 120 characters).");
+  if (await ownersCol.findOne({ name }, { collation: CASE_INSENSITIVE })) throw new HttpError(409, `"${name}" is already an owner.`);
+  await pushToSheet({ ownerAdds: [name] });
 
   const doc = { _id: randomUUID(), name, createdAt: new Date().toISOString() };
   await ownersCol.insertOne(doc).catch((error) => {
@@ -274,21 +480,27 @@ app.post("/api/owners", async (req, res) => {
     throw error;
   });
   res.status(201).json({ owner: toApi(doc) });
-});
+}));
 
 // Removing an owner unassigns their clients so no client points at a missing owner.
-app.delete("/api/owners/:id", async (req, res) => {
+app.delete("/api/owners/:id", (req, res) => exclusive(async () => {
+  const found = await ownersCol.findOne({ _id: req.params.id });
+  if (!found) throw new HttpError(404, "Owner not found.");
+  const affected = await clientsCol.find({ poc: found.name }, { collation: CASE_INSENSITIVE }).toArray();
+  await pushToSheet({
+    updates: affected.map((client) => ({ customerId: client.customerId, client: { ...client, poc: "" } })),
+    ownerRemoves: [found.name],
+  });
+
   const owner = await ownersCol.findOneAndDelete({ _id: req.params.id });
   if (!owner) throw new HttpError(404, "Owner not found.");
-
-  const affected = await clientsCol.find({ poc: owner.name }, { collation: CASE_INSENSITIVE }).toArray();
   const now = new Date().toISOString();
   if (affected.length) {
     await clientsCol.updateMany({ poc: owner.name }, { $set: { poc: "", updatedAt: now } }, { collation: CASE_INSENSITIVE });
     for (const client of affected) await logActivity(client, `POC → none (owner ${owner.name} removed)`, client._id, now);
   }
   res.json({ id: req.params.id, deleted: true, unassignedClients: affected.length });
-});
+}));
 
 app.use("/api", (_req, _res) => {
   throw new HttpError(404, "Unknown API route.");
@@ -306,6 +518,12 @@ app.use((error, _req, res, _next) => {
 const server = app.listen(PORT, () => {
   console.log(`Mapping Desk running at http://localhost:${PORT}/`);
 });
+
+if (sheet) {
+  console.log(`Google Sheet is the main copy (via Apps Script), checked every ${SHEET_SYNC_MS / 1000}s.`);
+  runSheetSync();
+  setInterval(runSheetSync, SHEET_SYNC_MS);
+}
 
 for (const signal of ["SIGINT", "SIGTERM"]) {
   process.on(signal, () => {

@@ -672,6 +672,16 @@ svg { flex: none; }
 .md-foot-btn { display: flex; align-items: center; gap: 7px; padding: 6px 8px; border: 1px solid hsl(var(--md-line)); border-radius: 7px; color: hsl(var(--md-muted)); background: none; font-size: 11px; text-align: left; }
 .md-foot-btn:hover { border-color: hsl(var(--md-line-strong)); color: hsl(var(--md-ink)); }
 .md-foot-hint { color: hsl(var(--md-dim)); font-size: 10.5px; }
+.md-sheet-link { border: 1px solid hsl(var(--md-line)); border-radius: 7px; color: hsl(var(--md-muted)); font-size: 11px; }
+.md-sheet-link summary { display: flex; align-items: center; gap: 7px; padding: 6px 8px; cursor: pointer; list-style: none; }
+.md-sheet-link summary::-webkit-details-marker { display: none; }
+.md-sheet-link summary:hover { color: hsl(var(--md-ink)); }
+.md-sheet-link.is-alert { border-color: hsl(var(--md-red) / .35); }
+.md-sheet-link.is-alert summary { color: hsl(var(--md-red)); }
+.md-sheet-link-body { display: grid; gap: 7px; padding: 0 8px 8px; line-height: 1.45; }
+.md-sheet-link-body p { margin: 0; color: hsl(var(--md-dim)); }
+.md-sheet-link-body ul { display: grid; gap: 4px; max-height: 180px; margin: 0; padding-left: 14px; overflow-y: auto; color: hsl(var(--md-ink)); }
+.md-sheet-link-body a { color: hsl(var(--md-ink)); font-weight: 600; }
 .md-foot-hint kbd { padding: 0 4px; border: 1px solid hsl(var(--md-line-strong)); border-radius: 4px; font: 10px ui-monospace, SFMono-Regular, Menlo, monospace; }
 
 /* Client sheet additions */

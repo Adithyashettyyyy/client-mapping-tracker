@@ -56,6 +56,7 @@
     calendar: '<path d="M4 7a2 2 0 0 1 2 -2h12a2 2 0 0 1 2 2v12a2 2 0 0 1 -2 2h-12a2 2 0 0 1 -2 -2v-12z"/><path d="M16 3v4"/><path d="M8 3v4"/><path d="M4 11h16"/><path d="M11 15h1"/><path d="M12 15v3"/>',
     check: '<path d="M5 12l5 5l10 -10"/>',
     clock: '<path d="M3 12a9 9 0 1 0 18 0a9 9 0 0 0 -18 0"/><path d="M12 7v5l3 3"/>',
+    "file-spreadsheet": '<path d="M14 3v4a1 1 0 0 0 1 1h4"/><path d="M17 21h-10a2 2 0 0 1 -2 -2v-14a2 2 0 0 1 2 -2h7l5 5v11a2 2 0 0 1 -2 2z"/><path d="M8 11h8v7h-8z"/><path d="M8 15h8"/><path d="M11 11v7"/>',
     download: '<path d="M4 17v2a2 2 0 0 0 2 2h12a2 2 0 0 0 2 -2v-2"/><path d="M7 11l5 5l5 -5"/><path d="M12 4l0 12"/>',
     "eye-pause": '<path d="M10 12a2 2 0 1 0 4 0a2 2 0 0 0 -4 0"/><path d="M13 17.94a9.6 9.6 0 0 1 -1 .06c-3.6 0 -6.6 -2 -9 -6c2.4 -4 5.4 -6 9 -6c3.6 0 6.6 2 9 6"/><path d="M17 17v5"/><path d="M21 17v5"/>',
     "layout-dashboard": '<path d="M5 4h4a1 1 0 0 1 1 1v6a1 1 0 0 1 -1 1h-4a1 1 0 0 1 -1 -1v-6a1 1 0 0 1 1 -1"/><path d="M5 16h4a1 1 0 0 1 1 1v2a1 1 0 0 1 -1 1h-4a1 1 0 0 1 -1 -1v-2a1 1 0 0 1 1 -1"/><path d="M15 12h4a1 1 0 0 1 1 1v6a1 1 0 0 1 -1 1h-4a1 1 0 0 1 -1 -1v-6a1 1 0 0 1 1 -1"/><path d="M15 4h4a1 1 0 0 1 1 1v2a1 1 0 0 1 -1 1h-4a1 1 0 0 1 -1 -1v-2a1 1 0 0 1 1 -1"/>',
@@ -88,6 +89,8 @@
   let cyclesClosedThisWeek = 0;
   let owners = [];
   let settings = { slaDays: 15 };
+  let sheetLink = { enabled: false }; // Google Sheet sync status from /api/sheet
+  let sheetDetailsOpen = false;
   let loadState = "loading"; // "loading" | "ready" | "error"
   let saving = false;
 
@@ -115,6 +118,7 @@
       cyclesClosedThisWeek = activityData.cyclesClosedThisWeek;
       owners = ownerData.owners;
       settings = settingsData.settings;
+      sheetLink = await api("/api/sheet").catch(() => sheetLink);
       loadState = "ready";
     } catch {
       if (loadState !== "ready") loadState = "error";
@@ -431,6 +435,34 @@
     if (!$("md-owners").hidden) renderOwnersList();
   }
 
+  function renderSheetLink() {
+    if (!sheetLink.enabled) return "";
+    const problems = sheetLink.problems ?? [];
+    let summary;
+    let alert = false;
+    if (sheetLink.error) {
+      summary = "Google Sheet: sync failed";
+      alert = true;
+    } else if (problems.length) {
+      summary = `Google Sheet: ${problems.length} row${problems.length === 1 ? "" : "s"} to fix`;
+      alert = true;
+    } else {
+      summary = sheetLink.lastSyncAt ? `Google Sheet synced ${timeAgo(sheetLink.lastSyncAt)}` : "Google Sheet: connecting…";
+    }
+    const items = [
+      ...(sheetLink.error ? [`<li>${esc(sheetLink.error)}</li>`] : []),
+      ...problems.map((problem) => `<li>${problem.row ? `<b>${problem.tab ? `${esc(problem.tab)} row` : "Row"} ${problem.row}:</b> ` : ""}${esc(problem.message)}</li>`),
+    ];
+    return `<details class="md-sheet-link${alert ? " is-alert" : ""}" id="md-sheet-link"${sheetDetailsOpen ? " open" : ""}>
+      <summary>${icon(alert ? "alert-circle" : "file-spreadsheet", 14)}<span>${esc(summary)}</span></summary>
+      <div class="md-sheet-link-body">
+        <p>The Google Sheet is the main copy. Edits there (clients tab and Owners tab) show here within 30 seconds; edits here go to the sheet first.</p>
+        ${items.length ? `<ul>${items.join("")}</ul>` : ""}
+        ${sheetLink.url ? `<a href="${esc(sheetLink.url)}" target="_blank" rel="noopener">Open the sheet</a>` : ""}
+      </div>
+    </details>`;
+  }
+
   function renderLoadState() {
     if (loadState === "loading") {
       return `<div class="md-page"><div class="md-skeleton-list md-card" aria-label="Loading clients"><div></div><div></div><div></div><div></div></div></div>`;
@@ -492,7 +524,7 @@
     }).join("")}
       <button type="button" class="md-team-add" data-action="owners-open">${icon("plus", 14)}<span>Add owner</span></button>`;
 
-    els.sidebarFoot.innerHTML = `
+    els.sidebarFoot.innerHTML = `${renderSheetLink()}
       <button type="button" class="md-foot-btn" data-action="settings-open" title="Change the overdue window">${icon("clock", 14)}<span>Overdue after ${settings.slaDays} days since final QC</span></button>
       <span class="md-foot-hint">Press <kbd>/</kbd> to search, <kbd>C</kbd> for a new client</span>`;
   }
@@ -551,7 +583,7 @@
         ? `<button type="button" class="md-link" data-action="open-client" data-id="${esc(client.id)}">CL-${esc(client.customerId)} ${esc(client.name)}</button> — `
         : item.customerId != null && !item.message.startsWith("Removed") ? `<b>CL-${esc(item.customerId)} ${esc(item.clientName)}</b> — ` : "";
       return `<div class="md-feed-item">
-        <span class="md-feed-badge">${icon(item.kind === "settings" ? "clock" : "check", 11, 2.5)}</span>
+        <span class="md-feed-badge">${icon(item.kind === "settings" ? "clock" : item.kind === "owner" ? "users" : "check", 11, 2.5)}</span>
         <div><p>${subject}${esc(item.message)}</p><small>${timeAgo(item.createdAt)} · ${esc(activityTime(item.createdAt))}</small></div>
       </div>`;
     }).join("");
@@ -1385,6 +1417,16 @@
   });
 
   window.addEventListener("hashchange", render);
+
+  document.addEventListener("toggle", (event) => {
+    if (event.target.id === "md-sheet-link") sheetDetailsOpen = event.target.open;
+  }, true);
+
+  // Pick up sheet edits while the page is open, but never while a form or dialog is in use.
+  setInterval(() => {
+    const busy = saving || !els.sheet.hidden || !$("md-owners").hidden || !$("md-settings").hidden || !$("md-dialog").hidden;
+    if (document.visibilityState === "visible" && loadState === "ready" && !busy) loadData();
+  }, 30_000);
 
   // Pick up changes made by teammates when returning to the tab.
   document.addEventListener("visibilitychange", () => {

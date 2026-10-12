@@ -18,3 +18,8 @@ services:
         sync: false
       - key: MONGODB_DB
         value: mapping_desk
+      # Optional Google Sheet sync (see README). Leave unset to run without a sheet.
+      - key: SHEET_SCRIPT_URL
+        sync: false
+      - key: SHEET_SYNC_SECRET
+        sync: false
