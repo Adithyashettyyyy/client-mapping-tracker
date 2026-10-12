@@ -6,7 +6,7 @@ import express from "express";
 import { MongoClient } from "mongodb";
 
 import { CLIENT_DEFAULTS, CLIENT_FIELDS, STEP_FIELDS, TRIMMED_FIELDS, validateClient } from "./lib/clients.js";
-import { OWNERS_TAB, SHEET_FIELDS, SheetLink, newClientFromSheet, rowsMissingFormula, sheetConfigFromEnv } from "./lib/sheets.js";
+import { OWNERS_TAB, SHEET_FIELDS, SheetLink, newClientFromSheet, planStatusFormulas, sheetConfigFromEnv } from "./lib/sheets.js";
 
 // ---------------------------------------------------------------------------
 // Config
@@ -186,8 +186,14 @@ async function syncFromSheet() {
   const parsed = await sheet.read();
   const now = new Date().toISOString();
   const problems = [...parsed.problems, ...(parsed.owners?.problems ?? [])];
-  // Every client row gets the Mapping Status formula, including rows typed straight into the sheet.
-  const sheetEdits = { updates: [], ownerAdds: [], formulaRows: rowsMissingFormula(parsed) };
+  // Client rows in the mapping cycle get the Mapping Status formula (including rows typed straight into
+  // the sheet); "No mapping needed" and "Awaiting request" rows don't. Tracking state lives in MongoDB.
+  const tracking = new Map((await clientsCol.find({}, { projection: { customerId: 1, trackingGroup: 1 } }).toArray()).map((c) => [c.customerId, c.trackingGroup]));
+  const sheetEdits = {
+    updates: [],
+    ownerAdds: [],
+    ...planStatusFormulas(parsed, (customerId, client) => tracking.get(customerId) ?? newClientFromSheet(client).trackingGroup),
+  };
 
   // --- Plan owners -----------------------------------------------------------
   const owners = await ownersCol.find().toArray();
@@ -238,7 +244,7 @@ async function syncFromSheet() {
     fromSheet.set(customerId, { ...client, poc: poc ? known.get(poc.toLowerCase()) : "" });
   }
 
-  if (sheetEdits.updates.length || sheetEdits.ownerAdds.length || sheetEdits.formulaRows.length || newSlaDays) await sheet.write(sheetEdits, parsed);
+  if (sheetEdits.updates.length || sheetEdits.ownerAdds.length || sheetEdits.formulaRows.length || sheetEdits.clearStatusRows.length || newSlaDays) await sheet.write(sheetEdits, parsed);
 
   // --- Apply to MongoDB ------------------------------------------------------
   let changed = 0;
